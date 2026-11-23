@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "Parko",
+    "slug": "parko-parking",
+    "scheme": "parko",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Autoriser Parko à photographier les plaques d’immatriculation.",
+          "photosPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "expo-ocr-kit"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.parkoparking"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "com.anonymous.parkoparking"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "34b13db2-b483-447f-9428-67ce48cc7388"
+      }
+    }
+  }
+}
