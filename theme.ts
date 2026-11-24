@@ -1,0 +1,16 @@
+export const COLORS = {
+  background: '#FAF8F6',
+  white: '#FFFFFF',
+  ink: '#151515',
+  muted: '#615C57',
+  orange: '#FF821C',
+  orangeTint: '#FFF0E3',
+  orangeDark: '#973804',
+  border: '#E4DED8',
+  inputBorder: '#A99F96',
+  neutral: '#F1ECE7',
+  onDarkMuted: '#D8D1C9',
+  onDarkBorder: '#5B5149',
+  error: '#923501',
+  overlay: '#15151588',
+};

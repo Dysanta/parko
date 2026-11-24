@@ -3,7 +3,7 @@ import type { Session } from '@supabase/supabase-js';
 import { randomUUID } from 'expo-crypto';
 import { File, Paths } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
-import { recognizeText } from 'expo-ocr-kit';
+import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -15,7 +15,6 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   Share,
   StyleSheet,
@@ -23,48 +22,38 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   cloudConfig,
+  readCloudBilling,
   readCloudRegister,
   registerCloudEntry,
-  registerCloudExit,
+  saveCloudService,
+  saveCloudVisitDetails,
   type CloudRegister,
   type PhotoCache,
   type Vehicle,
 } from './cloudRegister';
+import { billingDate } from './billing';
+import { StatementPanel, VisitBillingPanel, type BillingAction } from './BillingPanels';
+import { EditVehiclePanel, ExitReportPanel, VehicleDetailsFields } from './VehiclePanels';
+import { assertAvailableKey, DEFAULT_CAPACITY, detailsForm, normalizeReference, validLoadingNote, validParkingPosition, type DetailsForm } from './vehicleDetails';
+import { Reports } from './Reports';
+import { LoadingNotePanel } from './LoadingNotePanel';
+import { applyLocalRelease, assertLocalVisitNotReserved, confirmCloudRelease, withLocalRelease, withLocalReleaseWrite } from './loadingDocuments';
+import { loadLocalRegister, RECOVERY_KEY, STORAGE_KEY, withLocalRegisterWrite } from './localRegister';
+import type { ReleaseDocument } from './loadingNote';
+import { COLORS } from './theme';
+import { CAMERA_DRAFT_KEY, discardTemporaryPhoto, preparePhoto, readPlateFromPhoto, recoverCameraDraft } from './registerCamera';
 
 type VehicleFilter = 'active' | 'history';
+const WORKSPACE_TABS = [
+  { id: 'parking', label: 'Parking' },
+  { id: 'vehicles', label: 'Rapport véhicules' },
+  { id: 'finance', label: 'Suivi financier' },
+] as const;
 
-const STORAGE_KEY = '@stationnement/vehicles';
-const RECOVERY_KEY = '@stationnement/vehicles-recovery/';
-const CAMERA_DRAFT_KEY = '@stationnement/camera-draft';
-const INITIAL_TIME = Date.now();
-const COLORS = {
-  background: '#F3F4EE',
-  card: '#FFFFFF',
-  ink: '#17221B',
-  muted: '#7B837C',
-  green: '#174B35',
-  greenLight: '#E1F1E5',
-  lime: '#D5F66A',
-  border: '#E8EBE4',
-  red: '#A64235',
-};
-
-function isVehicle(value: unknown): value is Vehicle {
-  if (typeof value !== 'object' || value === null) return false;
-  const vehicle = value as Record<string, unknown>;
-
-  return (
-    typeof vehicle.id === 'string' &&
-    typeof vehicle.plate === 'string' &&
-    typeof vehicle.entryAt === 'string' &&
-    Number.isFinite(Date.parse(vehicle.entryAt)) &&
-    (typeof vehicle.photoUri === 'string' || vehicle.photoUri === null) &&
-    (vehicle.exitAt === null ||
-      (typeof vehicle.exitAt === 'string' && Number.isFinite(Date.parse(vehicle.exitAt))))
-  );
-}
+const parkLogo = require('./Logo_ParkLine.png');
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Une erreur inconnue est survenue.';
@@ -74,52 +63,8 @@ function normalizePlate(value: string) {
   return value.normalize('NFKC').toUpperCase().replace(/[\s.\p{Pd}]+/gu, '');
 }
 
-async function loadLocalRegister() {
-  const stored = await AsyncStorage.getItem(STORAGE_KEY);
-  if (stored === null) return { vehicles: [], recovered: false };
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stored);
-  } catch {
-    parsed = null;
-  }
-
-  const rows: unknown[] = Array.isArray(parsed) ? parsed : [];
-  const vehicles: Vehicle[] = [];
-  const unreadable: unknown[] = [];
-  for (const row of rows) {
-    // Older records may omit the optional photo.
-    const candidate =
-      typeof row === 'object' && row !== null && !('photoUri' in row)
-        ? { ...row, photoUri: null }
-        : row;
-    if (isVehicle(candidate)) {
-      vehicles.push(candidate);
-    } else {
-      unreadable.push(row);
-    }
-  }
-
-  const recovered = !Array.isArray(parsed) || unreadable.length > 0;
-  if (recovered) {
-    const backup = Array.isArray(parsed) ? JSON.stringify(unreadable) : stored;
-    const backupKey = `${RECOVERY_KEY}${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await AsyncStorage.setItem(backupKey, backup);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(vehicles));
-  }
-
-  return { vehicles, recovered };
-}
-
-function extractPlate(text: string) {
-  const normalizedText = text
-    .toUpperCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
-  const matches = normalizedText.match(/\b[A-Z]{2}[-\s]?\d{3}[-\s]?[A-Z]{2}\b|\b\d{4}[-\s]?[A-Z]{2}[-\s]?\d{2}\b/g);
-  const match = matches?.[0];
-  return match ? match.replace(/[^A-Z0-9]/g, '') : null;
+function isVisitIncomplete(visit: Vehicle) {
+  return !visit.keyNumber || !visit.aisle || !visit.makeModel || (visit.exitAt !== null && !visit.loadingNote);
 }
 
 function showAlert(title: string, message: string) {
@@ -130,70 +75,16 @@ function showAlert(title: string, message: string) {
   Alert.alert(title, message);
 }
 
-async function preparePhoto(asset: ImagePicker.ImagePickerAsset) {
-  if (Platform.OS === 'web') {
-    try {
-      const image = new window.Image();
-      image.src = asset.uri;
-      await image.decode();
-      const scale = Math.min(1, 1024 / Math.max(image.naturalWidth, image.naturalHeight));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Le navigateur ne peut pas traiter cette photo.');
-      context.fillStyle = '#fff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      return canvas.toDataURL('image/jpeg', 0.75);
-    } finally {
-      URL.revokeObjectURL(asset.uri);
-    }
-  }
-
-  // The camera result is temporary. Keep it there until the entry is saved.
-  return asset.uri;
-}
-
-function discardTemporaryPhoto(photoUri: string | null) {
-  if (!photoUri || Platform.OS === 'web') return;
-
-  try {
-    const cacheUri = Paths.cache.uri.replace(/\/$/, '');
-    if (!photoUri.startsWith(`${cacheUri}/ImagePicker/`)) return;
-    const photo = new File(photoUri);
-    if (photo.exists) photo.delete();
-  } catch {
-    // The device can clear cached camera files even if immediate deletion fails.
-  }
-}
-
-async function readPlateFromPhoto(photoUri: string) {
-  const result = await recognizeText(photoUri);
-  return extractPlate(result.text);
-}
-
-async function recoverCameraDraft() {
-  const draft = await AsyncStorage.getItem(CAMERA_DRAFT_KEY);
-  const result = await ImagePicker.getPendingResultAsync();
-  if (draft === null) return null;
-  await AsyncStorage.removeItem(CAMERA_DRAFT_KEY);
-  if (result && 'code' in result) throw new Error(result.message);
-  const asset = result?.assets?.[0];
-  if (!asset) return null;
-  const previousPlate: string = draft === 'pending-photo' ? '' : JSON.parse(draft);
-  return { previousPlate, photoUri: await preparePhoto(asset) };
-}
-
-function formatDateTime(value: string) {
+function formatDateTime(value: string, timeKnown = true) {
   const date = new Date(value);
-  return `${date.toLocaleDateString('fr-FR', {
-    day: '2-digit',
-    month: 'short',
-  })} · ${date.toLocaleTimeString('fr-FR', {
-    hour: '2-digit',
-    minute: '2-digit',
-  })}`;
+  if (!timeKnown) {
+    const [, month, day] = billingDate(value, false).split('-');
+    return new Date(Date.UTC(2000, Number(month) - 1, Number(day))).toLocaleDateString('fr-FR', {
+      day: '2-digit', month: 'short', timeZone: 'UTC',
+    });
+  }
+  const day = date.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
+  return `${day} · ${date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 function formatDuration(startAt: string, endAt: string) {
@@ -280,8 +171,8 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
       <StatusBar style="dark" />
       <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.signIn} keyboardShouldPersistTaps="handled">
-          <Text style={styles.brand}>PARKO</Text>
-          {session === undefined ? <ActivityIndicator color={COLORS.green} /> : (
+          <ParkLogo large />
+          {session === undefined ? <ActivityIndicator color={COLORS.ink} /> : (
             <>
               <Text style={styles.modalTitle}>Connexion agent</Text>
               <TextInput
@@ -324,10 +215,21 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
 }
 
 function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?: () => void }) {
+  const { tab } = useLocalSearchParams<{ tab?: string }>();
+  const selectedTab = tab === 'vehicles' || tab === 'finance' ? tab : 'parking';
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [filter, setFilter] = useState<VehicleFilter>('active');
+  const [search, setSearch] = useState('');
+  const [capacity, setCapacity] = useState(DEFAULT_CAPACITY);
+  const [entryDetails, setEntryDetails] = useState(() => detailsForm());
+  const [detailVisitId, setDetailVisitId] = useState<string | null>(null);
+  const [showExitReport, setShowExitReport] = useState(false);
+  const [documentPanel, setDocumentPanel] = useState<'loading' | 'release' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [showStatement, setShowStatement] = useState(false);
+  const [billingVisitId, setBillingVisitId] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [hasRecoveryBackup, setHasRecoveryBackup] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -338,13 +240,13 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
   const [isSaving, setIsSaving] = useState(false);
   const [isTakingPhoto, setIsTakingPhoto] = useState(false);
   const [isRecoveringCamera, setIsRecoveringCamera] = useState(Platform.OS === 'android');
-  const [now, setNow] = useState(INITIAL_TIME);
+  const [now, setNow] = useState(Date.now);
   const storedVehiclesRef = useRef<Vehicle[] | null>(null);
   const registerLoad = useRef<Promise<Awaited<ReturnType<typeof loadLocalRegister>>> | null>(null);
   const photoCache = useRef<PhotoCache>(new Map());
   const pendingWrite = useRef(Promise.resolve());
   const savingEntry = useRef(false);
-  const entryRequest = useRef<{ plate: string; photoUri: string | null; id: string } | null>(null);
+  const entryRequest = useRef<{ fingerprint: string; id: string; entryAt: string } | null>(null);
   const takingPhoto = useRef(false);
   const cameraRecovery = useRef<ReturnType<typeof recoverCameraDraft> | null>(null);
 
@@ -354,7 +256,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
 
     async function loadVehicles() {
       try {
-        registerLoad.current ??= loadLocalRegister();
+        registerLoad.current ??= withLocalRegisterWrite(loadLocalRegister);
         const { vehicles: loadedVehicles, recovered } = await registerLoad.current;
 
         if (!isMounted) return;
@@ -384,9 +286,17 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
 
     async function refresh() {
       try {
-        const loaded = await readCloudRegister(cloudRegister, cache, controller.signal);
+        const [loaded, billing] = await Promise.all([
+          readCloudRegister(cloudRegister, cache, controller.signal),
+          readCloudBilling(cloudRegister, controller.signal)
+            .then((data) => ({ data, error: null }))
+            .catch((problem: unknown) => ({ data: null, error: getErrorMessage(problem) })),
+        ]);
         if (controller.signal.aborted) return;
-        setVehicles(loaded);
+        setVehicles(loaded.vehicles.map((vehicle) => ({ ...vehicle, billing: billing.data?.get(vehicle.id) })));
+        setCapacity(loaded.dedicatedCapacity);
+        setNow(Date.now());
+        setBillingError(billing.error);
         setLoadError(null);
       } catch (problem) {
         if (controller.signal.aborted) return;
@@ -417,6 +327,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
         const detected = await readPlateFromPhoto(draft.photoUri).catch(() => null);
         if (!isMounted) return;
         setPlate(draft.previousPlate || detected || '');
+        setEntryDetails(draft.details);
         setPhotoUri(draft.photoUri);
         setOcrStatus(detected ? 'success' : 'error');
         setIsAddingVehicle(true);
@@ -434,7 +345,13 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(timer);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setNow(Date.now());
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
   }, []);
 
   const activeVehicles = useMemo(
@@ -445,20 +362,31 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
     () => vehicles.filter((vehicle) => vehicle.exitAt !== null),
     [vehicles],
   );
-  const visibleVehicles = filter === 'active' ? activeVehicles : historyVehicles;
+  const referenceSearch = normalizeReference(search);
+  const plateSearch = normalizePlate(search);
+  const visibleVehicles = (filter === 'active' ? activeVehicles : historyVehicles).filter((vehicle) =>
+    !referenceSearch || (!!plateSearch && vehicle.plate.includes(plateSearch)) ||
+    (vehicle.keyNumber ?? '').includes(referenceSearch),
+  );
   const canEdit = !isLoading && !isRecoveringCamera && loadError === null;
+  const billingVisit = vehicles.find((vehicle) => vehicle.id === billingVisitId);
+  const detailVisit = activeVehicles.find((vehicle) => vehicle.id === detailVisitId);
+  const billingUnavailable = loadError ?? billingError ?? (isLoading ? 'Chargement du registre…' : null);
   const isEntryBusy = isSaving || isTakingPhoto;
   const normalizedPlate = normalizePlate(plate);
   const isValidPlate = /^[\p{L}\p{N}]{1,32}$/u.test(normalizedPlate);
-  const todayEntries = vehicles.filter(
-    (vehicle) => new Date(vehicle.entryAt).toDateString() === new Date(now).toDateString(),
-  ).length;
+  const validEntryDetails = validParkingPosition(entryDetails.keyNumber, entryDetails.aisle);
+  const today = billingDate(now);
+  const todayEntries = vehicles.filter((vehicle) => billingDate(vehicle.entryAt, vehicle.entryTimeKnown) === today).length;
+  const todayExits = historyVehicles.filter((vehicle) => vehicle.exitAt && billingDate(vehicle.exitAt, vehicle.exitTimeKnown) === today).length;
+  const incomplete = vehicles.filter(isVisitIncomplete).length;
 
   function closeAddModal() {
     discardTemporaryPhoto(photoUri);
     entryRequest.current = null;
     setIsAddingVehicle(false);
     setPlate('');
+    setEntryDetails(detailsForm());
     setPhotoUri(null);
     setOcrStatus('idle');
   }
@@ -507,15 +435,14 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
   }
 
   function updateVehicles(update: (current: Vehicle[]) => Vehicle[] | Promise<Vehicle[]>) {
-    const write = pendingWrite.current.then(async () => {
-      const current = storedVehiclesRef.current;
-      if (current === null) throw new Error('Le registre est en lecture seule.');
+    const write = pendingWrite.current.then(() => withLocalRegisterWrite(async () => {
+      if (storedVehiclesRef.current === null) throw new Error('Le registre est en lecture seule.');
+      const { vehicles: current } = await loadLocalRegister();
       const updated = await update(current);
-      if (updated === current) return;
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      if (updated !== current) await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
       storedVehiclesRef.current = updated;
       setVehicles(updated);
-    });
+    }));
     pendingWrite.current = write.catch(() => {});
     return write;
   }
@@ -536,7 +463,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
           return;
         }
         if (Platform.OS === 'android') {
-          await AsyncStorage.setItem(CAMERA_DRAFT_KEY, JSON.stringify(plate));
+          await AsyncStorage.setItem(CAMERA_DRAFT_KEY, JSON.stringify({ plate, details: entryDetails }));
           hasAndroidDraft = true;
         }
       }
@@ -583,6 +510,10 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
       showAlert('Plaque invalide', 'Saisissez un numéro de plaque avec des lettres ou des chiffres.');
       return;
     }
+    if (!validEntryDetails) {
+      showAlert('Fiche incomplète', 'Renseigne un numéro de clé et sélectionne une allée.');
+      return;
+    }
 
     const entryAt = new Date();
     const vehicle: Vehicle = {
@@ -591,6 +522,9 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
       entryAt: entryAt.toISOString(),
       photoUri,
       exitAt: null,
+      keyNumber: normalizeReference(entryDetails.keyNumber),
+      aisle: entryDetails.aisle,
+      makeModel: entryDetails.makeModel.trim() || null,
     };
 
     savingEntry.current = true;
@@ -598,12 +532,14 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
     let storedPhoto: File | undefined;
     try {
       if (cloud) {
+        const fingerprint = JSON.stringify([normalizedPlate, photoUri, vehicle.keyNumber, vehicle.aisle, vehicle.makeModel]);
         const previous = entryRequest.current;
-        if (previous?.plate === normalizedPlate && previous.photoUri === photoUri) {
+        if (previous?.fingerprint === fingerprint) {
           vehicle.id = previous.id;
+          vehicle.entryAt = previous.entryAt;
         } else {
           vehicle.id = randomUUID();
-          entryRequest.current = { plate: normalizedPlate, photoUri, id: vehicle.id };
+          entryRequest.current = { fingerprint, id: vehicle.id, entryAt: vehicle.entryAt };
         }
         const photoSaved = await registerCloudEntry(cloud, vehicle);
         setLoadAttempt((attempt) => attempt + 1);
@@ -618,6 +554,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
         if (current.some((item) => item.exitAt === null && normalizePlate(item.plate) === normalizedPlate)) {
           throw new Error('Cette plaque est déjà enregistrée dans le parking.');
         }
+        assertAvailableKey(current, normalizeReference(entryDetails.keyNumber));
         if (photoUri && Platform.OS !== 'web') {
           const source = new File(photoUri);
           const extension = /^\.[a-z0-9]+$/i.test(source.extension) ? source.extension : '.jpg';
@@ -643,45 +580,75 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
     }
   }
 
-  function confirmVehicleExit(vehicle: Vehicle) {
-    if (!canEdit) return;
-    const message = `Confirmer la sortie du véhicule ${vehicle.plate} ?`;
-    if (Platform.OS === 'web') {
-      if (window.confirm(message)) void saveVehicleExit(vehicle);
+  async function confirmRelease(document: ReleaseDocument) {
+    if (!canEdit) throw new Error('Actualise le registre avant de valider l’enlèvement.');
+    if (!cloud) {
+      const deviceTime = Date.now();
+      await withLocalRelease(document.number, (saved, documents) => updateVehicles((current) =>
+        applyLocalRelease(saved, current, deviceTime, documents)));
+      setNow(Date.now());
       return;
     }
-    Alert.alert(
-      'Enregistrer la sortie',
-      message,
-      [
-        { text: 'Annuler', style: 'cancel' },
-        {
-          text: 'Confirmer la sortie',
-          onPress: () => {
-            void saveVehicleExit(vehicle);
-          },
-        },
-      ],
-    );
+    const confirmedAt = await confirmCloudRelease(document.number, cloud);
+    setNow(Date.now());
+    setLoadAttempt((attempt) => attempt + 1);
+    return confirmedAt;
   }
 
-  async function saveVehicleExit(vehicle: Vehicle) {
-    const exitAt = new Date().toISOString();
-    try {
-      if (cloud) {
-        await registerCloudExit(cloud, vehicle.id);
-        setLoadAttempt((attempt) => attempt + 1);
-        return;
-      }
-      await updateVehicles((current) => {
-        if (!current.some((item) => item.id === vehicle.id && item.exitAt === null)) return current;
-        return current.map((item) =>
-          item.id === vehicle.id && item.exitAt === null ? { ...item, exitAt } : item,
-        );
-      });
-    } catch (error) {
-      showAlert('Sortie impossible à enregistrer', getErrorMessage(error));
+  async function saveVehicleDetails(id: string, form: DetailsForm) {
+    if (!canEdit) throw new Error('Actualise le registre avant de modifier la fiche.');
+    const keyNumber = normalizeReference(form.keyNumber);
+    const loadingNote = normalizeReference(form.loadingNote) || null;
+    if (!validParkingPosition(keyNumber, form.aisle)) {
+      throw new Error('Renseigne un numéro de clé et sélectionne une allée.');
     }
+    if (loadingNote && !validLoadingNote(loadingNote)) throw new Error('Le numéro de bon est invalide.');
+    const details = { keyNumber, aisle: form.aisle, makeModel: form.makeModel.trim() || null, loadingNote };
+    if (cloud) {
+      await saveCloudVisitDetails(cloud, id, details);
+      setLoadAttempt((attempt) => attempt + 1);
+      return;
+    }
+    await withLocalReleaseWrite(() => updateVehicles(async (current) => {
+      const before = current.find((item) => item.id === id && item.exitAt === null);
+      if (!before) throw new Error('Le véhicule a déjà quitté le parking.');
+      assertAvailableKey(current, keyNumber, id);
+      if (before.keyNumber !== keyNumber || before.aisle !== details.aisle ||
+        (before.loadingNote ?? null) !== loadingNote) {
+        await assertLocalVisitNotReserved(id);
+      }
+      return current.map((item) => item.id === id ? { ...item, ...details } : item);
+    }));
+  }
+
+  async function changeVisitBilling(id: string, action: BillingAction) {
+    if (billingUnavailable) throw new Error(billingUnavailable);
+
+    function update(visit: Vehicle): Vehicle {
+      const { service, remove } = action;
+      if (!remove && (service.performedOn < billingDate(visit.entryAt, visit.entryTimeKnown)
+        || service.performedOn > billingDate(visit.exitAt ?? Date.now(), visit.exitAt ? visit.exitTimeKnown : true))) {
+        throw new Error('La date de réalisation doit être comprise dans le séjour.');
+      }
+      const remaining = (visit.billing?.services ?? []).filter((item) => item.id !== service.id);
+      return { ...visit, billing: { services: remove ? remaining : [...remaining, service] } };
+    }
+
+    if (cloud) {
+      await saveCloudService(cloud, id, action.service, action.remove);
+      setVehicles((current) => current.map((visit) => {
+        if (visit.id !== id) return visit;
+        // A refresh can have picked up another agent's edit during this request.
+        try {
+          return update(visit);
+        } catch {
+          return visit;
+        }
+      }));
+      setLoadAttempt((attempt) => attempt + 1);
+      return;
+    }
+    await updateVehicles((current) => current.map((visit) => visit.id === id ? update(visit) : visit));
   }
 
   return (
@@ -689,155 +656,227 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
       <StatusBar style="dark" />
       <View style={styles.screen}>
         <View style={styles.header}>
-          <View>
-            <Text style={styles.brand}>PARKO</Text>
-            <Text style={styles.headerSubtitle}>Gestion du parking</Text>
-          </View>
+          <ParkLogo />
           {onSignOut ? (
             <Pressable accessibilityRole="button" onPress={onSignOut} disabled={isEntryBusy}>
               <Text style={styles.registerAction}>Se déconnecter</Text>
             </Pressable>
-          ) : (
-            <View style={styles.headerBadge}>
-              <Text style={styles.headerBadgeText}>P</Text>
-            </View>
-          )}
+          ) : null}
         </View>
 
+        <View accessibilityRole="tablist" style={styles.workspaceTabs}>
+          {WORKSPACE_TABS.map(({ id, label }) => (
+            <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: id === selectedTab }}
+              onPress={() => {
+                setNow(Date.now());
+                router.setParams({ tab: id });
+              }} style={[styles.workspaceTab, id === selectedTab && styles.workspaceTabSelected]}>
+              <Text style={styles.workspaceTabLabel}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          <Text style={styles.dateLabel}>
-            {new Date(now).toLocaleDateString('fr-FR', {
-              weekday: 'long',
-              day: 'numeric',
-              month: 'long',
-            })}
-          </Text>
-
-          <View style={styles.summaryCard}>
-            <View style={styles.summaryTopRow}>
-              <View style={styles.liveLabel}>
-                <View style={styles.liveDot} />
-                <Text style={styles.liveText}>EN DIRECT</Text>
-              </View>
-              <Text style={styles.summaryCaption}>Véhicules présents</Text>
-            </View>
-            <View style={styles.summaryBottomRow}>
-              <Text style={styles.vehicleCount}>{String(activeVehicles.length).padStart(2, '0')}</Text>
-              <View style={styles.summaryDivider} />
-              <View style={styles.summaryStats}>
-                <Text style={styles.summaryStatNumber}>{todayEntries}</Text>
-                <Text style={styles.summaryStatLabel}>entrées aujourd’hui</Text>
-              </View>
-            </View>
-            <View style={styles.summaryAccent} />
-          </View>
-
-          <View style={styles.sectionHeading}>
-            <View>
-              <Text style={styles.sectionTitle}>Véhicules</Text>
-              <Text style={styles.sectionSubtitle}>Suivez les mouvements du parking</Text>
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              disabled={!canEdit}
-              onPress={() => setIsAddingVehicle(true)}
-              style={({ pressed }) => [styles.addButton, (pressed || !canEdit) && styles.pressed]}
-            >
-              <Text style={styles.addButtonPlus}>＋</Text>
-              <Text style={styles.addButtonText}>Entrée</Text>
-            </Pressable>
-          </View>
-
-          {loadError && (
-            <View>
-              <Text accessibilityRole="alert" style={styles.storageError}>
-                {loadError} {cloud ? 'Vérifiez votre connexion ou votre accès.' : 'Le registre est en lecture seule pour préserver les données.'}
-              </Text>
-              <Pressable accessibilityRole="button" disabled={isLoading} onPress={retryLoad}>
-                <Text style={styles.registerAction}>Réessayer le chargement</Text>
+          {selectedTab !== 'parking' ? (
+            <Reports kind={selectedTab} cloud={cloud} vehicles={vehicles} asOf={now}
+              localError={loadError ?? (isLoading ? 'Chargement du registre…' : null)} />
+          ) : (
+            <>
+            <Text style={styles.dateLabel}>
+              {new Date(now).toLocaleDateString('fr-FR', {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+              })}
+            </Text>
+            <View style={styles.vehicleActions}>
+              <Pressable accessibilityRole="button" onPress={() => {
+                setNow(Date.now());
+                setShowStatement(true);
+              }} style={[styles.exitButton, styles.actionButton]}>
+                <Text style={styles.exitButtonText}>Facturation</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={!canEdit}
+                onPress={() => setDocumentPanel('loading')} style={[styles.exitButton, styles.actionButton]}>
+                <Text style={styles.exitButtonText}>Bon de chargement</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button"
+                onPress={() => setDocumentPanel('release')} style={[styles.exitButton, styles.actionButton]}>
+                <Text style={styles.exitButtonText}>Bon de sortie</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={!canEdit}
+                onPress={() => { setNow(Date.now()); setShowExitReport(true); }} style={[styles.exitButton, styles.actionButton]}>
+                <Text style={styles.exitButtonText}>Rapport des sorties</Text>
               </Pressable>
             </View>
-          )}
-          {hasRecoveryBackup && (
-            <Text accessibilityRole="alert" style={styles.storageError}>
-              Les données illisibles ont été mises de côté. Elles sont disponibles dans l’export du registre.
-            </Text>
-          )}
 
-          <View style={styles.filterBar}>
-            <FilterButton
-              label="En cours"
-              count={activeVehicles.length}
-              selected={filter === 'active'}
-              onPress={() => setFilter('active')}
-            />
-            <FilterButton
-              label="Historique"
-              count={historyVehicles.length}
-              selected={filter === 'history'}
-              onPress={() => setFilter('history')}
-            />
-          </View>
-
-          {isLoading ? (
-            <View style={styles.loadingState}>
-              <ActivityIndicator color={COLORS.green} />
-              <Text style={styles.loadingText}>Chargement des véhicules…</Text>
-            </View>
-          ) : visibleVehicles.length === 0 ? (
-            <View style={styles.emptyState}>
-              <View style={styles.emptyIcon}>
-                <Text style={styles.emptyIconText}>{filter === 'active' ? 'P' : '↗'}</Text>
+            <View style={styles.summaryCard}>
+              <View style={styles.summaryTopRow}>
+                <View style={styles.liveLabel}>
+                  <View style={styles.liveDot} />
+                  <Text style={styles.liveText}>EN DIRECT</Text>
+                </View>
+                <Text style={styles.summaryCaption}>Véhicules présents</Text>
               </View>
-              <Text style={styles.emptyTitle}>
-                {filter === 'active' ? 'Parking vide pour le moment' : 'Pas encore d’historique'}
-              </Text>
-              <Text style={styles.emptyDescription}>
-                {filter === 'active'
-                  ? loadError
-                    ? 'Aucun véhicule présent ne peut être affiché.'
-                    : 'Enregistrez une entrée pour commencer le suivi.'
-                  : 'Les véhicules sortis apparaîtront ici.'}
-              </Text>
-              {filter === 'active' && canEdit && (
-                <Pressable onPress={() => setIsAddingVehicle(true)} style={styles.emptyAction}>
-                  <Text style={styles.emptyActionText}>Enregistrer une entrée</Text>
-                </Pressable>
-              )}
+              <View style={styles.summaryBottomRow}>
+                <Text style={styles.vehicleCount}>{String(activeVehicles.length).padStart(2, '0')}</Text>
+                <View style={styles.summaryDivider} />
+                <View style={styles.summaryStats}>
+                  <Text style={styles.summaryStatNumber}>{todayEntries}</Text>
+                  <Text style={styles.summaryStatLabel}>entrées aujourd’hui</Text>
+                </View>
+              </View>
+              <View style={styles.summaryAccent} />
             </View>
-          ) : (
-            <View style={styles.vehicleList}>
-              {visibleVehicles.map((vehicle) => (
-                <VehicleCard
-                  key={vehicle.id}
-                  vehicle={vehicle}
-                  now={now}
-                  onExit={canEdit ? () => confirmVehicleExit(vehicle) : undefined}
-                />
-              ))}
-            </View>
-          )}
+            <Text style={styles.sectionSubtitle}>
+              {Math.max(0, capacity - activeVehicles.length)} places libres sur {capacity}
+              {' · '}{Math.round(activeVehicles.length / capacity * 100)} % d’occupation
+              {' · '}{todayExits} sortie(s) aujourd’hui
+              {' · '}{incomplete} fiche(s) à compléter
+            </Text>
 
-          <Text style={styles.localNotice}>
-            {cloud ? 'Registre partagé · actualisation toutes les 15 secondes' : 'Données enregistrées sur cet appareil'}
-          </Text>
-          {!cloud && (
-            <Pressable
-              accessibilityRole="button"
-              disabled={isLoading || isExporting}
-              onPress={() => void exportRegister()}
-            >
-              <Text style={styles.registerAction}>
-                {isExporting ? 'Export en cours…' : 'Exporter les fiches du registre'}
+            <View style={styles.sectionHeading}>
+              <View>
+                <Text style={styles.sectionTitle}>Véhicules</Text>
+                <Text style={styles.sectionSubtitle}>Suivez les mouvements du parking</Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                disabled={!canEdit}
+                onPress={() => setIsAddingVehicle(true)}
+                style={({ pressed }) => [styles.addButton, (pressed || !canEdit) && styles.pressed]}
+              >
+                <Text style={styles.addButtonPlus}>+</Text>
+                <Text style={styles.addButtonText}>Entrée</Text>
+              </Pressable>
+            </View>
+
+            {loadError && (
+              <View>
+                <Text accessibilityRole="alert" style={styles.storageError}>
+                  {loadError} {cloud ? 'Vérifiez votre connexion ou votre accès.' : 'Le registre est en lecture seule pour préserver les données.'}
+                </Text>
+                <Pressable accessibilityRole="button" disabled={isLoading} onPress={retryLoad}>
+                  <Text style={styles.registerAction}>Réessayer le chargement</Text>
+                </Pressable>
+              </View>
+            )}
+            {hasRecoveryBackup && (
+              <Text accessibilityRole="alert" style={styles.storageError}>
+                Les données illisibles ont été mises de côté. Elles sont disponibles dans l’export du registre.
               </Text>
-            </Pressable>
+            )}
+
+            <TextInput
+              accessibilityLabel="Rechercher par plaque ou clé" value={search} onChangeText={setSearch}
+              placeholder="Rechercher par plaque ou clé" autoCorrect={false} style={styles.plateResult}
+            />
+            <View style={styles.filterBar}>
+              <FilterButton
+                label="En cours"
+                count={activeVehicles.length}
+                selected={filter === 'active'}
+                onPress={() => setFilter('active')}
+              />
+              <FilterButton
+                label="Historique"
+                count={historyVehicles.length}
+                selected={filter === 'history'}
+                onPress={() => setFilter('history')}
+              />
+            </View>
+
+            {isLoading ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color={COLORS.ink} />
+                <Text style={styles.loadingText}>Chargement des véhicules…</Text>
+              </View>
+            ) : visibleVehicles.length === 0 ? (
+              <View style={styles.emptyState}>
+                <View style={styles.emptyIcon}>
+                  <Text style={styles.emptyIconText}>{filter === 'active' ? 'P' : '↗'}</Text>
+                </View>
+                <Text style={styles.emptyTitle}>
+                  {referenceSearch ? 'Aucun véhicule trouvé' : filter === 'active' ? 'Parking vide pour le moment' : 'Pas encore d’historique'}
+                </Text>
+                <Text style={styles.emptyDescription}>
+                  {referenceSearch ? 'Essaie avec une autre plaque ou un autre numéro de clé.' : filter === 'active'
+                    ? loadError
+                      ? 'Aucun véhicule présent ne peut être affiché.'
+                      : 'Enregistrez une entrée pour commencer le suivi.'
+                    : 'Les véhicules sortis apparaîtront ici.'}
+                </Text>
+                {filter === 'active' && canEdit && !referenceSearch && (
+                  <Pressable onPress={() => setIsAddingVehicle(true)} style={styles.emptyAction}>
+                    <Text style={styles.emptyActionText}>Enregistrer une entrée</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : (
+              <View style={styles.vehicleList}>
+                {visibleVehicles.map((vehicle) => (
+                  <VehicleCard
+                    key={vehicle.id}
+                    vehicle={vehicle}
+                    now={now}
+                    onEdit={canEdit ? () => setDetailVisitId(vehicle.id) : undefined}
+                    onBilling={() => {
+                      setNow(Date.now());
+                      setBillingVisitId(vehicle.id);
+                    }}
+                  />
+                ))}
+              </View>
+            )}
+
+            <Text style={styles.localNotice}>
+              {cloud ? 'Registre partagé · actualisation toutes les 15 secondes' : 'Données enregistrées sur cet appareil'}
+            </Text>
+            {!cloud && (
+              <Pressable
+                accessibilityRole="button"
+                disabled={isLoading || isExporting}
+                onPress={() => void exportRegister()}
+              >
+                <Text style={styles.registerAction}>
+                  {isExporting ? 'Export en cours…' : 'Exporter les fiches du registre'}
+                </Text>
+              </Pressable>
+            )}
+            </>
           )}
         </ScrollView>
       </View>
+
+      {showStatement && (
+        <StatementPanel
+          vehicles={vehicles} asOf={now} unavailable={billingUnavailable}
+          onClose={() => setShowStatement(false)}
+        />
+      )}
+      {billingVisit && (
+        <VisitBillingPanel
+          key={billingVisit.id}
+          visit={billingVisit} asOf={now} unavailable={billingUnavailable}
+          onChange={(action) => changeVisitBilling(billingVisit.id, action)}
+          onClose={() => setBillingVisitId(null)}
+        />
+      )}
+      {detailVisit && (
+        <EditVehiclePanel key={detailVisit.id} visit={detailVisit} onClose={() => setDetailVisitId(null)}
+          onSave={(form) => saveVehicleDetails(detailVisit.id, form)} />
+      )}
+      {showExitReport && (
+        <ExitReportPanel vehicles={historyVehicles} asOf={now} onClose={() => setShowExitReport(false)} />
+      )}
+      {documentPanel && (
+        <LoadingNotePanel key={documentPanel} vehicles={vehicles} cloud={cloud} lookup={documentPanel === 'release'}
+          canConfirm={canEdit} onConfirm={confirmRelease} onCreate={() => setDocumentPanel('loading')}
+          onClose={() => setDocumentPanel(null)} />
+      )}
 
       <Modal
         animationType="slide"
@@ -885,6 +924,9 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
               style={styles.plateResult}
               value={plate}
             />
+            <View style={styles.detailsFields}>
+              <VehicleDetailsFields value={entryDetails} onChange={setEntryDetails} disabled={isEntryBusy} />
+            </View>
 
             <Text style={[styles.inputLabel, styles.photoLabel]}>PHOTO DE LA PLAQUE (FACULTATIVE)</Text>
             <Pressable
@@ -945,11 +987,11 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
 
             <Pressable
               accessibilityRole="button"
-              disabled={isEntryBusy || !canEdit || !isValidPlate}
+              disabled={isEntryBusy || !canEdit || !isValidPlate || !validEntryDetails}
               onPress={() => void saveVehicleEntry()}
               style={({ pressed }) => [
                 styles.submitButton,
-                (pressed || isEntryBusy || !canEdit || !isValidPlate) && styles.pressed,
+                (pressed || isEntryBusy || !canEdit || !isValidPlate || !validEntryDetails) && styles.pressed,
               ]}
             >
               {isSaving ? (
@@ -994,11 +1036,13 @@ function FilterButton({
 function VehicleCard({
   vehicle,
   now,
-  onExit,
+  onEdit,
+  onBilling,
 }: {
   vehicle: Vehicle;
   now: number;
-  onExit?: () => void;
+  onEdit?: () => void;
+  onBilling: () => void;
 }) {
   const isActive = vehicle.exitAt === null;
   const endAt = vehicle.exitAt ?? new Date(now).toISOString();
@@ -1016,9 +1060,13 @@ function VehicleCard({
         )}
         <View style={styles.vehicleInfo}>
           <Text style={styles.vehiclePlate}>{vehicle.plate}</Text>
-          <Text style={styles.vehicleEntry}>Entrée · {formatDateTime(vehicle.entryAt)}</Text>
+          <Text style={styles.vehicleEntry}>Clé {vehicle.keyNumber || '—'} · Allée {vehicle.aisle || '—'}</Text>
+          {vehicle.makeModel && <Text style={styles.vehicleEntry}>{vehicle.makeModel}</Text>}
+          {vehicle.loadingNote && <Text style={styles.vehicleEntry}>Bon · {vehicle.loadingNote}</Text>}
+          {isVisitIncomplete(vehicle) && <Text style={styles.vehicleEntry}>Fiche à compléter</Text>}
+          <Text style={styles.vehicleEntry}>Entrée · {formatDateTime(vehicle.entryAt, vehicle.entryTimeKnown)}</Text>
           {vehicle.exitAt && (
-            <Text style={styles.vehicleEntry}>Sortie · {formatDateTime(vehicle.exitAt)}</Text>
+            <Text style={styles.vehicleEntry}>Sortie · {formatDateTime(vehicle.exitAt, vehicle.exitTimeKnown)}</Text>
           )}
         </View>
         <View style={[styles.vehicleStatus, isActive ? styles.statusActive : styles.statusDone]}>
@@ -1036,61 +1084,67 @@ function VehicleCard({
       <View style={styles.vehicleCardBottom}>
         <View>
           <Text style={styles.durationLabel}>{isActive ? 'TEMPS ÉCOULÉ' : 'DURÉE TOTALE'}</Text>
-          <Text style={styles.durationValue}>{duration}</Text>
+          <Text style={styles.durationValue}>
+            {vehicle.entryTimeKnown === false || vehicle.exitTimeKnown === false ? 'Heure inconnue' : duration}
+          </Text>
         </View>
-        {isActive && onExit && (
-          <Pressable
-            accessibilityRole="button"
-            onPress={onExit}
-            style={({ pressed }) => [styles.exitButton, pressed && styles.pressed]}
-          >
-            <Text style={styles.exitButtonText}>Sortie ↗</Text>
+        {isActive && onEdit && (
+          <Pressable accessibilityRole="button" onPress={onEdit} style={styles.exitButton}>
+            <Text style={styles.exitButtonText}>Modifier la fiche</Text>
           </Pressable>
         )}
+        <Pressable accessibilityRole="button" onPress={onBilling} style={styles.exitButton}>
+          <Text style={styles.exitButtonText}>Prestations</Text>
+        </Pressable>
       </View>
     </View>
   );
 }
 
+function ParkLogo({ large = false }: { large?: boolean }) {
+  return (
+    <View style={[styles.logoFrame, large && styles.largeLogoFrame]}>
+      <Image source={parkLogo} accessibilityLabel="PerfectLine Park" accessible resizeMode="contain"
+        style={[styles.logoImage, large && styles.largeLogoImage]} />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  workspaceTabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingHorizontal: 18, paddingBottom: 6 },
+  workspaceTab: {
+    paddingVertical: 10, paddingHorizontal: 10, borderRadius: 9, backgroundColor: COLORS.white,
+    borderWidth: 1, borderColor: COLORS.border,
+  },
+  workspaceTabSelected: { backgroundColor: COLORS.orangeTint, borderColor: COLORS.orange },
+  workspaceTabLabel: { color: COLORS.ink, fontSize: 12, fontWeight: '800' },
+  vehicleActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  actionButton: { flexBasis: '46%', flexGrow: 1, justifyContent: 'center', minHeight: 44 },
+  detailsFields: { marginTop: 14 },
   safeArea: {
     flex: 1,
     backgroundColor: COLORS.background,
+    borderTopWidth: 3,
+    borderTopColor: COLORS.orange,
   },
   screen: {
     flex: 1,
   },
   header: {
-    height: 74,
-    paddingHorizontal: 24,
+    minHeight: 76,
+    paddingHorizontal: 20,
+    backgroundColor: COLORS.white,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+    marginBottom: 12,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  brand: {
-    color: COLORS.green,
-    fontSize: 20,
-    fontWeight: '900',
-    letterSpacing: 2,
-  },
-  headerSubtitle: {
-    color: COLORS.muted,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  headerBadge: {
-    height: 42,
-    width: 42,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.lime,
-  },
-  headerBadgeText: {
-    color: COLORS.green,
-    fontSize: 19,
-    fontWeight: '900',
-  },
+  logoFrame: { width: 132, height: 69, overflow: 'hidden', backgroundColor: COLORS.white },
+  logoImage: { position: 'absolute', width: 225, height: 101, left: -47, top: -23 },
+  largeLogoFrame: { width: 212, height: 120, alignSelf: 'center' },
+  largeLogoImage: { width: 359, height: 161, left: -74, top: -27 },
   scrollContent: {
     paddingHorizontal: 20,
     paddingBottom: 36,
@@ -1104,8 +1158,10 @@ const styles = StyleSheet.create({
     textTransform: 'capitalize',
   },
   summaryCard: {
-    backgroundColor: COLORS.green,
+    backgroundColor: COLORS.ink,
     borderRadius: 24,
+    borderTopWidth: 3,
+    borderTopColor: COLORS.orange,
     padding: 21,
     overflow: 'hidden',
     minHeight: 159,
@@ -1124,16 +1180,16 @@ const styles = StyleSheet.create({
     height: 7,
     width: 7,
     borderRadius: 4,
-    backgroundColor: COLORS.lime,
+    backgroundColor: COLORS.orange,
   },
   liveText: {
-    color: COLORS.lime,
+    color: COLORS.orange,
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 1.1,
   },
   summaryCaption: {
-    color: '#CAD8CD',
+    color: COLORS.onDarkMuted,
     fontSize: 12,
   },
   summaryBottomRow: {
@@ -1142,7 +1198,7 @@ const styles = StyleSheet.create({
     marginTop: 13,
   },
   vehicleCount: {
-    color: '#FFFFFF',
+    color: COLORS.white,
     fontSize: 48,
     fontWeight: '700',
     letterSpacing: -2,
@@ -1151,19 +1207,19 @@ const styles = StyleSheet.create({
   summaryDivider: {
     width: 1,
     height: 38,
-    backgroundColor: '#54735F',
+    backgroundColor: COLORS.onDarkBorder,
     marginHorizontal: 20,
   },
   summaryStats: {
     gap: 2,
   },
   summaryStatNumber: {
-    color: '#FFFFFF',
+    color: COLORS.white,
     fontSize: 19,
     fontWeight: '700',
   },
   summaryStatLabel: {
-    color: '#CAD8CD',
+    color: COLORS.onDarkMuted,
     fontSize: 11,
   },
   summaryAccent: {
@@ -1174,7 +1230,7 @@ const styles = StyleSheet.create({
     width: 160,
     borderRadius: 80,
     borderWidth: 1,
-    borderColor: '#315F47',
+    borderColor: COLORS.onDarkBorder,
   },
   sectionHeading: {
     marginTop: 28,
@@ -1198,24 +1254,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 4,
     alignItems: 'center',
-    backgroundColor: COLORS.lime,
+    backgroundColor: COLORS.orange,
     paddingHorizontal: 13,
     height: 42,
     borderRadius: 14,
   },
   addButtonPlus: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 19,
     fontWeight: '500',
     marginTop: -1,
   },
   addButtonText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 12,
     fontWeight: '800',
   },
   filterBar: {
-    backgroundColor: '#E8EAE3',
+    backgroundColor: COLORS.neutral,
     borderRadius: 14,
     padding: 4,
     flexDirection: 'row',
@@ -1231,8 +1287,8 @@ const styles = StyleSheet.create({
     gap: 7,
   },
   filterButtonSelected: {
-    backgroundColor: COLORS.card,
-    shadowColor: '#29372D',
+    backgroundColor: COLORS.white,
+    shadowColor: COLORS.ink,
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.07,
     shadowRadius: 3,
@@ -1250,25 +1306,25 @@ const styles = StyleSheet.create({
     color: COLORS.muted,
     fontSize: 10,
     fontWeight: '700',
-    backgroundColor: '#DDE0D8',
+    backgroundColor: COLORS.border,
     overflow: 'hidden',
     borderRadius: 8,
     paddingHorizontal: 6,
     paddingVertical: 2,
   },
   filterCountSelected: {
-    color: COLORS.green,
-    backgroundColor: COLORS.greenLight,
+    color: COLORS.ink,
+    backgroundColor: COLORS.orangeTint,
   },
   vehicleList: {
     gap: 11,
   },
   vehicleCard: {
-    backgroundColor: COLORS.card,
+    backgroundColor: COLORS.white,
     borderRadius: 18,
     padding: 14,
     borderWidth: 1,
-    borderColor: '#ECEEE9',
+    borderColor: COLORS.border,
   },
   vehicleCardTop: {
     flexDirection: 'row',
@@ -1278,7 +1334,7 @@ const styles = StyleSheet.create({
     height: 52,
     width: 67,
     borderRadius: 9,
-    backgroundColor: '#E8EBE4',
+    backgroundColor: COLORS.border,
   },
   platePlaceholder: {
     height: 48,
@@ -1286,10 +1342,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     borderRadius: 7,
     borderWidth: 2,
-    borderColor: '#D6DAD3',
+    borderColor: COLORS.inputBorder,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FAFBF8',
+    backgroundColor: COLORS.background,
   },
   platePlaceholderText: {
     color: COLORS.ink,
@@ -1319,10 +1375,10 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   statusActive: {
-    backgroundColor: COLORS.greenLight,
+    backgroundColor: COLORS.orangeTint,
   },
   statusDone: {
-    backgroundColor: '#F0F1EE',
+    backgroundColor: COLORS.neutral,
   },
   vehicleStatusText: {
     fontSize: 8,
@@ -1330,17 +1386,19 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
   statusTextActive: {
-    color: COLORS.green,
+    color: COLORS.ink,
   },
   statusTextDone: {
     color: COLORS.muted,
   },
   vehicleCardBottom: {
     borderTopWidth: 1,
-    borderTopColor: '#F0F1EE',
+    borderTopColor: COLORS.neutral,
     marginTop: 13,
     paddingTop: 11,
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
     alignItems: 'center',
     justifyContent: 'space-between',
   },
@@ -1357,13 +1415,13 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   exitButton: {
-    backgroundColor: '#F5F6F1',
+    backgroundColor: COLORS.orangeTint,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 9,
   },
   exitButtonText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 11,
     fontWeight: '800',
   },
@@ -1378,29 +1436,29 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   storageError: {
-    color: COLORS.red,
+    color: COLORS.error,
     marginVertical: 12,
   },
   emptyState: {
-    backgroundColor: COLORS.card,
+    backgroundColor: COLORS.white,
     borderRadius: 18,
     alignItems: 'center',
     paddingHorizontal: 22,
     paddingVertical: 25,
     borderWidth: 1,
-    borderColor: '#ECEEE9',
+    borderColor: COLORS.border,
   },
   emptyIcon: {
     height: 44,
     width: 44,
     borderRadius: 15,
-    backgroundColor: COLORS.greenLight,
+    backgroundColor: COLORS.orangeTint,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 12,
   },
   emptyIconText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 22,
     fontWeight: '800',
   },
@@ -1418,29 +1476,34 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   emptyAction: {
-    backgroundColor: COLORS.lime,
+    backgroundColor: COLORS.orange,
     borderRadius: 11,
     paddingVertical: 10,
     paddingHorizontal: 14,
     marginTop: 15,
   },
   emptyActionText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 11,
     fontWeight: '800',
   },
   localNotice: {
-    color: '#9BA198',
+    color: COLORS.muted,
     textAlign: 'center',
     fontSize: 10,
     marginTop: 18,
   },
   signIn: {
     gap: 14,
-    padding: 22,
+    width: '100%',
+    maxWidth: 440,
+    alignSelf: 'center',
+    paddingHorizontal: 22,
+    paddingTop: 32,
+    paddingBottom: 28,
   },
   registerAction: {
-    color: COLORS.green,
+    color: COLORS.orangeDark,
     fontSize: 12,
     fontWeight: '700',
     paddingVertical: 12,
@@ -1452,7 +1515,7 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(18, 30, 21, 0.48)',
+    backgroundColor: COLORS.overlay,
   },
   modalSheet: {
     flexGrow: 0,
@@ -1470,7 +1533,7 @@ const styles = StyleSheet.create({
     width: 38,
     height: 4,
     borderRadius: 2,
-    backgroundColor: '#D5D9D0',
+    backgroundColor: COLORS.border,
     alignSelf: 'center',
     marginBottom: 18,
   },
@@ -1496,7 +1559,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 12,
-    backgroundColor: '#E8EAE3',
+    backgroundColor: COLORS.neutral,
   },
   closeButtonText: {
     color: COLORS.ink,
@@ -1512,7 +1575,7 @@ const styles = StyleSheet.create({
   },
   plateResult: {
     height: 53,
-    backgroundColor: COLORS.card,
+    backgroundColor: COLORS.white,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 13,
@@ -1529,7 +1592,7 @@ const styles = StyleSheet.create({
     minHeight: 70,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.card,
+    backgroundColor: COLORS.white,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 14,
@@ -1564,12 +1627,12 @@ const styles = StyleSheet.create({
     height: 42,
     width: 42,
     borderRadius: 13,
-    backgroundColor: COLORS.greenLight,
+    backgroundColor: COLORS.orangeTint,
     alignItems: 'center',
     justifyContent: 'center',
   },
   cameraIconText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 25,
     fontWeight: '700',
   },
@@ -1581,7 +1644,7 @@ const styles = StyleSheet.create({
     marginBottom: 17,
   },
   timeInfoIcon: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 16,
     fontWeight: '700',
   },
@@ -1591,13 +1654,13 @@ const styles = StyleSheet.create({
   },
   submitButton: {
     minHeight: 52,
-    backgroundColor: COLORS.lime,
+    backgroundColor: COLORS.orange,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
   },
   submitButtonText: {
-    color: COLORS.green,
+    color: COLORS.ink,
     fontSize: 13,
     fontWeight: '800',
   },

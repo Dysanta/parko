@@ -16,7 +16,9 @@
           "microphonePermission": false
         }
       ],
-      "expo-ocr-kit"
+      "expo-ocr-kit",
+      "expo-sharing",
+      "expo-router"
     ],
     "ios": {
       "supportsTablet": true,
