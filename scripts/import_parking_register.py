@@ -97,6 +97,9 @@ def read_register(path):
         normalize = lambda text: unicodedata.normalize("NFKC", text).strip().upper()
         plate = "".join(c for c in normalize(cells.get("B", "")) if not c.isspace() and c != "." and unicodedata.category(c) != "Pd")
         key, aisle, note = (normalize(cells.get(column, "")) for column in ("C", "D", "M"))
+        annotation = note if note in {"REPRIS PAR CLIENT", "PARTIE TAXI"} else None
+        if annotation:
+            note = ""
         model = cells.get("L", "") or None
         errors = []
         for value, pattern, label in (
@@ -120,7 +123,9 @@ def read_register(path):
             except (ValueError, OverflowError):
                 errors.append(f"Date colonne {column} invalide")
                 times.extend((None, False))
-        yield (line, plate, key, aisle, model, note or None, *times, " / ".join(errors) or None)
+        if annotation and not times[2]:
+            errors.append("Sortie signalée dans le commentaire sans date de sortie")
+        yield (line, plate, key, aisle, model, note or None, *times, " / ".join(errors) or None, annotation)
     if not header_found:
         raise ValueError("En-têtes du registre introuvables.")
 
@@ -140,7 +145,7 @@ def generate(rows, parking, apply):
         ("line", "integer"), ("plate", "text"), ("key_number", "text"), ("aisle", "text"),
         ("make_model", "text"), ("loading_note", "text"), ("entered_on", "timestamp"),
         ("entered_time_known", "boolean"), ("exited_on", "timestamp"),
-        ("exited_time_known", "boolean"), ("source_error", "text"),
+        ("exited_time_known", "boolean"), ("source_error", "text"), ("annotation", "text"),
     ]
     names = ", ".join(name for name, _ in fields)
     values = ",\n".join(
@@ -150,7 +155,8 @@ def generate(rows, parking, apply):
     reconciliation = f"""with source_visits ({names}) as (values
 {values}
 ), candidates as (
-  select source.*, match.ids, matched.id as existing_id, matched.exited_at as existing_exit,
+  select source.*, match.ids, matched.id as existing_id, matched.entered_at as existing_entry,
+    matched.exited_at as existing_exit,
     matched.key_number as existing_key, matched.aisle as existing_aisle,
     matched.make_model as existing_model, matched.loading_note as existing_note
   from source_visits source
@@ -172,9 +178,15 @@ select source.*,
       select 1 from source_visits other where other.line <> source.line and other.plate = source.plate
         and other.entered_on::date = source.entered_on::date
     ) then 'Plusieurs séjours pour la plaque et la date d’entrée'
-    when existing_id is not null and
-      (existing_exit at time zone 'Europe/Paris')::date is distinct from exited_on::date
+    when existing_exit is not null and exited_on is not null and
+      (existing_exit at time zone 'Europe/Paris')::date <> exited_on::date
       then 'La sortie ne correspond pas au séjour Parko'
+    when existing_id is not null and existing_exit is null and exited_on is not null and exists (
+      select 1 from public.parking_exit_reservations r where r.visit_id = source.existing_id
+    ) then 'Séjour réservé par un bon de sortie PARKO'
+    when existing_id is not null and existing_exit is null and exited_time_known
+      and (exited_on at time zone 'Europe/Paris') < existing_entry
+      then 'Heure de sortie antérieure à l’entrée enregistrée dans PARKO'
     when existing_id is not null and
       (coalesce(existing_key <> key_number, false) or coalesce(existing_aisle <> aisle, false)
       or coalesce(existing_model <> make_model, false) or coalesce(existing_note <> loading_note, false))
@@ -190,16 +202,24 @@ select source.*,
 from candidates source"""
     summary = """select line as ligne_excel, plate as immatriculation, entered_on::date as date_entree,
   case when obstacle is not null then 'À vérifier'
+    when existing_id is not null and existing_exit is null and exited_on is not null then 'Compléter la sortie'
     when existing_id is not null then 'Rapprochement Parko' else 'Nouveau séjour' end as action,
   obstacle, concat_ws(' / ',
     case when make_model is null then 'Marque / modèle à compléter' end,
-    case when exited_on is not null and loading_note is null then 'Bon de chargement manquant' end
+    case when exited_on is not null and loading_note is null then 'Bon de chargement manquant' end,
+    annotation
   ) as observations
 from reconciliation order by line;"""
     if not apply:
         return f"-- APERÇU — lecture seule\nwith reconciliation as (\n{reconciliation}\n)\n{summary}\n"
     return f"""-- IMPORT
 begin;
+do $$
+begin
+  perform 1 from public.parkings where id = '{parking}'::uuid for update;
+  if not found then raise exception 'Le parking cible est introuvable dans ce projet.'; end if;
+end;
+$$;
 lock table public.parking_visits in share row exclusive mode;
 create temporary table reconciliation on commit drop as
 {reconciliation};
@@ -214,7 +234,11 @@ update public.parking_visits v
 set key_number = coalesce(v.key_number, source.key_number),
     aisle = coalesce(v.aisle, source.aisle),
     make_model = coalesce(v.make_model, source.make_model),
-    loading_note = coalesce(v.loading_note, source.loading_note)
+    loading_note = coalesce(v.loading_note, source.loading_note),
+    exited_at = case when v.exited_at is null and source.exited_on is not null
+      then greatest(source.exited_on at time zone 'Europe/Paris', v.entered_at) else v.exited_at end,
+    exited_time_known = case when v.exited_at is null and source.exited_on is not null
+      then source.exited_time_known else v.exited_time_known end
 from reconciliation source where source.obstacle is null and v.id = source.existing_id;
 
 insert into public.parking_visits (
