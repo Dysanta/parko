@@ -171,7 +171,7 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
       <StatusBar style="dark" />
       <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <ScrollView contentContainerStyle={styles.signIn} keyboardShouldPersistTaps="handled">
-          <ParkLogo large />
+          <ParkBrand large />
           {session === undefined ? <ActivityIndicator color={COLORS.ink} /> : (
             <>
               <Text style={styles.modalTitle}>Connexion agent</Text>
@@ -656,9 +656,9 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
       <StatusBar style="dark" />
       <View style={styles.screen}>
         <View style={styles.header}>
-          <ParkLogo />
+          <ParkBrand />
           {onSignOut ? (
-            <Pressable accessibilityRole="button" onPress={onSignOut} disabled={isEntryBusy}>
+            <Pressable accessibilityRole="button" onPress={onSignOut} disabled={isEntryBusy} style={styles.signOut}>
               <Text style={styles.registerAction}>Se déconnecter</Text>
             </Pressable>
           ) : null}
@@ -1101,11 +1101,14 @@ function VehicleCard({
   );
 }
 
-function ParkLogo({ large = false }: { large?: boolean }) {
+function ParkBrand({ large = false }: { large?: boolean }) {
   return (
-    <View style={[styles.logoFrame, large && styles.largeLogoFrame]}>
-      <Image source={parkLogo} accessibilityLabel="PerfectLine Park" accessible resizeMode="contain"
-        style={[styles.logoImage, large && styles.largeLogoImage]} />
+    <View style={[styles.brand, large && styles.largeBrand]}>
+      <View style={[styles.logoFrame, large && styles.largeLogoFrame]}>
+        <Image source={parkLogo} accessibilityLabel="PerfectLine Park" accessible resizeMode="contain"
+          style={[styles.logoImage, large && styles.largeLogoImage]} />
+      </View>
+      <Text accessibilityRole="header" style={[styles.brandName, large && styles.largeBrandName]}>Parko</Text>
     </View>
   );
 }
@@ -1138,12 +1141,18 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.border,
     marginBottom: 12,
     flexDirection: 'row',
+    gap: 12,
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  logoFrame: { width: 132, height: 69, overflow: 'hidden', backgroundColor: COLORS.white },
-  logoImage: { position: 'absolute', width: 225, height: 101, left: -47, top: -23 },
-  largeLogoFrame: { width: 212, height: 120, alignSelf: 'center' },
+  brand: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  largeBrand: { flexDirection: 'column', gap: 4 },
+  brandName: { color: COLORS.ink, fontSize: 22, fontWeight: '900' },
+  largeBrandName: { fontSize: 30 },
+  signOut: { flexShrink: 1 },
+  logoFrame: { width: 118, height: 62, overflow: 'hidden', backgroundColor: COLORS.white },
+  logoImage: { position: 'absolute', width: 200, height: 90, left: -41, top: -19 },
+  largeLogoFrame: { width: 212, height: 120 },
   largeLogoImage: { width: 359, height: 161, left: -74, top: -27 },
   scrollContent: {
     paddingHorizontal: 20,
