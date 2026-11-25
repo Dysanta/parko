@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SERVICES, validBillingDate } from './billing';
 import type { Vehicle } from './cloudRegister';
+import { registerStorageKey } from './registerEnvironment';
 
-export const STORAGE_KEY = '@stationnement/vehicles';
-export const RECOVERY_KEY = '@stationnement/vehicles-recovery/';
+export const STORAGE_KEY = registerStorageKey('@stationnement/vehicles');
+export const RECOVERY_KEY = registerStorageKey('@stationnement/vehicles-recovery/');
 
 export function withLocalRegisterWrite<T>(write: () => Promise<T>) {
   if (typeof navigator !== 'undefined' && navigator.locks) {

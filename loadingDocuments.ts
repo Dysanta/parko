@@ -5,9 +5,10 @@ import {
   type LoadingNote, type ReleaseDocument,
 } from './loadingNote';
 import { loadLocalRegister, withLocalRegisterWrite } from './localRegister';
+import { registerStorageKey } from './registerEnvironment';
 
-const documentKey = '@stationnement/exit-documents';
-const reservationVersionKey = '@stationnement/exit-reservations-v1';
+const documentKey = registerStorageKey('@stationnement/exit-documents');
+const reservationVersionKey = registerStorageKey('@stationnement/exit-reservations-v1');
 const releasePageSize = 25;
 let releaseWrite = Promise.resolve();
 

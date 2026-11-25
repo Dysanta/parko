@@ -13,6 +13,7 @@
     "expo-dev-client": "~58.0.21",
     "expo-document-picker": "~58.0.5",
     "expo-file-system": "~58.0.14",
+    "expo-image": "~58.0.18",
     "expo-image-picker": "~58.0.10",
     "expo-linking": "~58.0.17",
     "expo-ocr-kit": "^0.1.4",
@@ -20,6 +21,7 @@
     "expo-router": "~58.0.32",
     "expo-sharing": "~58.0.23",
     "expo-status-bar": "~58.0.5",
+    "js-base64": "^3.9.7",
     "pdf-lib": "^1.17.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -35,13 +37,16 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
-    "start": "expo start",
+    "start": "node scripts/start-local.mjs offline",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web",
+    "web": "node scripts/start-local.mjs offline --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:local": "node scripts/start-local.mjs local --web",
+    "test:permissions": "node scripts/check-local-security.mjs",
+    "backup:local": "node scripts/backup-local.mjs"
   },
   "private": true
 }

@@ -121,8 +121,9 @@ export function StatementPanel({ vehicles, asOf, unavailable, onClose }: {
 
 export type BillingAction = { service: VisitService; remove: boolean };
 
-export function VisitBillingPanel({ visit, asOf, unavailable, onChange, onClose }: {
-  visit: Vehicle; asOf: number; unavailable: string | null; onChange: (action: BillingAction) => Promise<void>; onClose: () => void;
+export function VisitBillingPanel({ visit, asOf, unavailable, canRemove, onChange, onClose }: {
+  visit: Vehicle; asOf: number; unavailable: string | null; canRemove: boolean;
+  onChange: (action: BillingAction) => Promise<void>; onClose: () => void;
 }) {
   const [service, setService] = useState<ServiceKind>();
   const [day, setDay] = useState(() => billingDate(visit.exitAt ?? asOf, visit.exitAt ? visit.exitTimeKnown : true));
@@ -164,7 +165,7 @@ export function VisitBillingPanel({ visit, asOf, unavailable, onChange, onClose 
   }
 
   return (
-    <Panel title={`Facturation · ${visit.plate}`} onClose={() => { if (!working.current) onClose(); }}>
+    <Panel title={`Prestations · ${visit.plate}`} onClose={() => { if (!working.current) onClose(); }}>
       {unavailable ? <Text accessibilityRole="alert" style={styles.error}>{unavailable}</Text> : (
         <>
           {!!visit.billing?.services.length && <Text style={styles.label}>Prestations réalisées</Text>}
@@ -174,7 +175,7 @@ export function VisitBillingPanel({ visit, asOf, unavailable, onChange, onClose 
                 <Text style={styles.choiceText}>{SERVICES[item.kind].label}</Text>
                 <Text style={styles.description}>{item.performedOn} · {formatEuros(SERVICES[item.kind].cents)} HT</Text>
               </View>
-              <Choice label="Retirer" disabled={busy} onPress={() => void save({ service: item, remove: true })} />
+              {canRemove && <Choice label="Retirer" disabled={busy} onPress={() => void save({ service: item, remove: true })} />}
             </View>
           ))}
           <Text style={styles.label}>Ajouter une prestation</Text>

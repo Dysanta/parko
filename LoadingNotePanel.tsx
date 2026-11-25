@@ -22,8 +22,8 @@ const fields = [
   { key: 'pickupDate', label: 'Date d’enlèvement', max: 10 },
 ] as const;
 
-export function LoadingNotePanel({ vehicles, cloud, lookup, canConfirm, onClose, onConfirm, onCreate }: {
-  vehicles: Vehicle[]; cloud?: CloudRegister; lookup: boolean; canConfirm: boolean; onClose: () => void;
+export function LoadingNotePanel({ vehicles, cloud, lookup, canConfirm, canCancel, onClose, onConfirm, onCreate }: {
+  vehicles: Vehicle[]; cloud?: CloudRegister; lookup: boolean; canConfirm: boolean; canCancel: boolean; onClose: () => void;
   onConfirm: (document: ReleaseDocument) => Promise<string | undefined>;
   onCreate: () => void;
 }) {
@@ -210,7 +210,7 @@ export function LoadingNotePanel({ vehicles, cloud, lookup, canConfirm, onClose,
           <Text style={styles.detail}>{confirmedAt
             ? `Enlèvement validé le ${new Date(confirmedAt).toLocaleString('fr-FR')}`
             : `Coche la case à l’enlèvement des ${document.rows.length} véhicule(s) du bon.`}</Text>
-            {!confirmedAt && (askingCancellation ? (
+            {canCancel && !confirmedAt && (askingCancellation ? (
               <>
                 <Text style={styles.detail}>Les véhicules resteront présents et pourront être ajoutés à un nouveau bon.</Text>
                 <Choice label="Confirmer l’annulation du bon" disabled={busy || !canConfirm}

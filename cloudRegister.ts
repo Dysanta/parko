@@ -4,6 +4,7 @@ import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 import type { ServiceKind, VisitBilling, VisitService } from './billing';
 import type { VehicleDetails } from './vehicleDetails';
+import { isLoopbackSupabase, registerMode } from './registerEnvironment';
 
 export type Vehicle = VehicleDetails & {
   id: string;
@@ -47,6 +48,18 @@ export type CloudRegister = {
 
 export type PhotoCache = Map<string, { uri: string | null; expiresAt: number }>;
 export type ReportsSnapshot = { asOf: string; vehicles: Vehicle[] };
+export type ParkingAccess = { role: 'agent' | 'responsable'; mfaRequired: boolean };
+
+export async function readCloudAccess({ client, parkingId }: CloudRegister, signal: AbortSignal): Promise<ParkingAccess> {
+  const { data, error } = await client.rpc('read_parking_access', { target_parking: parkingId }).abortSignal(signal);
+  if (error?.code === 'PGRST202') throw new Error('La migration Supabase 011 doit être appliquée dans cet environnement.');
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error('Ce compte n’a pas accès à ce parking.');
+  if (!['agent', 'responsable'].includes(data.role) || typeof data.mfaRequired !== 'boolean') {
+    throw new Error('Les droits attribués à ce compte ne sont pas valides.');
+  }
+  return data;
+}
 
 const bucket = 'parko-plates';
 const projectUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -55,14 +68,20 @@ const parkingId = process.env.EXPO_PUBLIC_PARKING_ID;
 const requiresSharedRegister = process.env.EXPO_PUBLIC_REQUIRE_SHARED_REGISTER === 'true';
 
 export const cloudConfig: CloudRegister | 'invalid' | null = (() => {
-  if (!projectUrl && !publishableKey && !parkingId) return requiresSharedRegister ? 'invalid' : null;
-  if (!projectUrl?.startsWith('https://') || !publishableKey?.startsWith('sb_publishable_')
+  if (registerMode === 'offline') return null;
+  if (!projectUrl && !publishableKey && !parkingId && registerMode === 'release') return requiresSharedRegister ? 'invalid' : null;
+  const validUrl = !!projectUrl && (registerMode === 'local'
+    ? isLoopbackSupabase(projectUrl) : registerMode === 'release' && projectUrl.startsWith('https://'));
+  if (!validUrl || !projectUrl || !publishableKey?.startsWith('sb_publishable_')
     || !parkingId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(parkingId)) {
     return 'invalid';
   }
   try {
     const client = createClient(projectUrl, publishableKey, {
-      auth: { storage: AsyncStorage, detectSessionInUrl: false, persistSession: true },
+      auth: {
+        storage: AsyncStorage, detectSessionInUrl: false, persistSession: true,
+        ...(registerMode === 'local' && { storageKey: 'parko-test-supabase-auth' }),
+      },
     });
     return { client, parkingId: parkingId.toLowerCase() };
   } catch {
@@ -169,8 +188,8 @@ export async function saveCloudService(
   { client }: CloudRegister, visitId: string, service: VisitService, remove: boolean,
 ) {
   const table = client.from('parking_visit_services');
-  const { error } = remove
-    ? await table.delete().eq('visit_id', visitId).eq('id', service.id)
+  const { data, error } = remove
+    ? await table.delete().eq('visit_id', visitId).eq('id', service.id).select('id')
     : await table.upsert({
       id: service.id, visit_id: visitId, kind: service.kind, performed_on: service.performedOn,
       time_zone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -179,6 +198,7 @@ export async function saveCloudService(
     throw new Error('Applique la migration Supabase 009 pour enregistrer les prestations en heure locale.');
   }
   if (error) throw new Error(error.message);
+  if (remove && !data?.length) throw new Error('La prestation est introuvable ou ton compte ne peut pas la retirer.');
 }
 
 export async function registerCloudEntry({ client, parkingId }: CloudRegister, vehicle: Vehicle) {

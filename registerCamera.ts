@@ -4,8 +4,9 @@ import * as ImagePicker from 'expo-image-picker';
 import { recognizeText } from 'expo-ocr-kit';
 import { Platform } from 'react-native';
 import { detailsForm } from './vehicleDetails';
+import { registerStorageKey } from './registerEnvironment';
 
-export const CAMERA_DRAFT_KEY = '@stationnement/camera-draft';
+export const CAMERA_DRAFT_KEY = registerStorageKey('@stationnement/camera-draft');
 
 function extractPlate(text: string) {
   const normalizedText = text

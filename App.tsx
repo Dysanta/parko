@@ -24,17 +24,19 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   cloudConfig,
+  readCloudAccess,
   readCloudBilling,
   readCloudRegister,
   registerCloudEntry,
   saveCloudService,
   saveCloudVisitDetails,
   type CloudRegister,
+  type ParkingAccess,
   type PhotoCache,
   type Vehicle,
 } from './cloudRegister';
 import { billingDate } from './billing';
-import { StatementPanel, VisitBillingPanel, type BillingAction } from './BillingPanels';
+import { Choice, StatementPanel, VisitBillingPanel, type BillingAction } from './BillingPanels';
 import { EditVehiclePanel, ExitReportPanel, VehicleDetailsFields } from './VehiclePanels';
 import { assertAvailableKey, DEFAULT_CAPACITY, detailsForm, normalizeReference, validLoadingNote, validParkingPosition, type DetailsForm } from './vehicleDetails';
 import { Reports } from './Reports';
@@ -44,6 +46,8 @@ import { loadLocalRegister, RECOVERY_KEY, STORAGE_KEY, withLocalRegisterWrite } 
 import type { ReleaseDocument } from './loadingNote';
 import { COLORS } from './theme';
 import { KeyboardViewport } from './KeyboardViewport';
+import { ParkingMfa } from './ParkingMfa';
+import { registerMode } from './registerEnvironment';
 import { CAMERA_DRAFT_KEY, discardTemporaryPhoto, preparePhoto, readPlateFromPhoto, recoverCameraDraft } from './registerCamera';
 
 type VehicleFilter = 'active' | 'history';
@@ -164,7 +168,7 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
   }
 
   if (session) {
-    return <ParkingScreen key={session.user.id} cloud={cloud} onSignOut={() => void signOut()} />;
+    return <AuthenticatedParking key={session.user.id} cloud={cloud} onSignOut={() => void signOut()} />;
   }
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -214,9 +218,62 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
   );
 }
 
-function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?: () => void }) {
+function AuthenticatedParking({ cloud, onSignOut }: { cloud: CloudRegister; onSignOut: () => void }) {
+  const [revision, setRevision] = useState(0);
+  const [status, setStatus] = useState<{ access: ParkingAccess; needsMfa: boolean }>();
+  const [error, setError] = useState('');
+
+  function refresh() {
+    setStatus(undefined);
+    setError('');
+    setRevision((value) => value + 1);
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      const access = await readCloudAccess(cloud, controller.signal);
+      const { data, error: issue } = await cloud.client.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (issue) throw issue;
+      if (!controller.signal.aborted) setStatus({
+        access,
+        needsMfa: data.currentLevel !== 'aal2' && (access.mfaRequired || data.nextLevel === 'aal2'),
+      });
+    })().catch((issue: unknown) => {
+      if (!controller.signal.aborted) setError(getErrorMessage(issue));
+    });
+    return () => controller.abort();
+  }, [cloud, revision]);
+
+  if (status && !status.needsMfa) {
+    return <ParkingScreen cloud={cloud} role={status.access.role} onSignOut={onSignOut} />;
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar style="dark" />
+      <KeyboardViewport style={styles.screen}>
+        <ScrollView contentContainerStyle={styles.signIn} keyboardShouldPersistTaps="handled">
+          <ParkBrand large />
+          {status?.needsMfa ? <ParkingMfa auth={cloud.client.auth} onVerified={refresh} /> : error ? (
+            <>
+              <Text accessibilityRole="alert" style={styles.storageError}>{error}</Text>
+              <Choice label="Réessayer" onPress={refresh} />
+            </>
+          ) : <ActivityIndicator accessibilityLabel="Vérification des droits" color={COLORS.ink} />}
+          <Choice label="Se déconnecter" onPress={onSignOut} />
+        </ScrollView>
+      </KeyboardViewport>
+    </SafeAreaView>
+  );
+}
+
+function ParkingScreen({ cloud, role = 'responsable', onSignOut }: {
+  cloud?: CloudRegister; role?: ParkingAccess['role']; onSignOut?: () => void;
+}) {
+  const canManage = role === 'responsable';
   const { tab } = useLocalSearchParams<{ tab?: string }>();
-  const selectedTab = tab === 'vehicles' || tab === 'finance' ? tab : 'parking';
+  const selectedTab = tab === 'vehicles' || (canManage && tab === 'finance') ? tab : 'parking';
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [filter, setFilter] = useState<VehicleFilter>('active');
   const [search, setSearch] = useState('');
@@ -664,8 +721,9 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
           ) : null}
         </View>
 
+        {registerMode !== 'release' && <Text style={styles.testMode}>Environnement de test local</Text>}
         <View accessibilityRole="tablist" style={styles.workspaceTabs}>
-          {WORKSPACE_TABS.map(({ id, label }) => (
+          {WORKSPACE_TABS.filter(({ id }) => canManage || id !== 'finance').map(({ id, label }) => (
             <Pressable key={id} accessibilityRole="tab" accessibilityState={{ selected: id === selectedTab }}
               onPress={() => {
                 setNow(Date.now());
@@ -693,12 +751,12 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
               })}
             </Text>
             <View style={styles.vehicleActions}>
-              <Pressable accessibilityRole="button" onPress={() => {
+              {canManage && <Pressable accessibilityRole="button" onPress={() => {
                 setNow(Date.now());
                 setShowStatement(true);
               }} style={[styles.exitButton, styles.actionButton]}>
                 <Text style={styles.exitButtonText}>Facturation</Text>
-              </Pressable>
+              </Pressable>}
               <Pressable accessibilityRole="button" disabled={!canEdit}
                 onPress={() => setDocumentPanel('loading')} style={[styles.exitButton, styles.actionButton]}>
                 <Text style={styles.exitButtonText}>Bon de chargement</Text>
@@ -851,7 +909,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
         </ScrollView>
       </KeyboardViewport>
 
-      {showStatement && (
+      {canManage && showStatement && (
         <StatementPanel
           vehicles={vehicles} asOf={now} unavailable={billingUnavailable}
           onClose={() => setShowStatement(false)}
@@ -861,6 +919,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
         <VisitBillingPanel
           key={billingVisit.id}
           visit={billingVisit} asOf={now} unavailable={billingUnavailable}
+          canRemove={canManage}
           onChange={(action) => changeVisitBilling(billingVisit.id, action)}
           onClose={() => setBillingVisitId(null)}
         />
@@ -874,7 +933,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
       )}
       {documentPanel && (
         <LoadingNotePanel key={documentPanel} vehicles={vehicles} cloud={cloud} lookup={documentPanel === 'release'}
-          canConfirm={canEdit} onConfirm={confirmRelease} onCreate={() => setDocumentPanel('loading')}
+          canConfirm={canEdit} canCancel={canManage && canEdit} onConfirm={confirmRelease} onCreate={() => setDocumentPanel('loading')}
           onClose={() => setDocumentPanel(null)} />
       )}
 
@@ -1106,11 +1165,13 @@ function ParkBrand({ large = false }: { large?: boolean }) {
           style={[styles.logoImage, large && styles.largeLogoImage]} />
       </View>
       <Text accessibilityRole="header" style={[styles.brandName, large && styles.largeBrandName]}>Parko</Text>
+      {registerMode !== 'release' && large && <Text style={styles.registerAction}>Environnement de test local</Text>}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  testMode: { color: COLORS.muted, fontWeight: '700', paddingHorizontal: 18, marginBottom: 8 },
   workspaceTabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingHorizontal: 18, paddingBottom: 6 },
   workspaceTab: {
     paddingVertical: 10, paddingHorizontal: 10, borderRadius: 9, backgroundColor: COLORS.white,

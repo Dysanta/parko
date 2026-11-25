@@ -52,7 +52,7 @@ function printableHtml(title: string, content: string, landscape = false) {
       @media print { .print { display: none; } }
     </style></head><body>
     ${content}
-    <button class="print" onclick="window.print()">Imprimer ou enregistrer en PDF</button>
+    <button class="print" type="button">Imprimer ou enregistrer en PDF</button>
     </body></html>`;
 }
 
@@ -134,14 +134,16 @@ export function exportLoadingRelease(document: ReleaseDocument) {
 
 async function exportPrintable(html: string) {
   if (Platform.OS === 'web') {
-    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
-    const tab = window.open(url, '_blank');
+    const tab = window.open('', '_blank');
     if (!tab) {
-      URL.revokeObjectURL(url);
       throw new Error('Autorise l’ouverture d’un onglet pour afficher le relevé.');
     }
     tab.opener = null;
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    // The generated document escapes register data. Bind printing without an inline script.
+    tab.document.open();
+    tab.document.write(html);
+    tab.document.close();
+    tab.document.querySelector('.print')?.addEventListener('click', () => tab.print());
     return;
   }
   if (!await isAvailableAsync()) throw new Error('Le partage de PDF est indisponible sur cet appareil.');
