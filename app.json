@@ -5,7 +5,7 @@
     "scheme": "parko",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/parko-icon.png",
     "userInterfaceStyle": "light",
     "plugins": [
       [
@@ -25,11 +25,10 @@
       "bundleIdentifier": "com.anonymous.parkoparking"
     },
     "android": {
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/parko-android-foreground.png"
       },
       "predictiveBackGestureEnabled": false,
       "permissions": [
@@ -38,7 +37,7 @@
       "package": "com.anonymous.parkoparking"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./public/apple-touch-icon.png"
     },
     "extra": {
       "eas": {

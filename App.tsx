@@ -11,7 +11,6 @@ import {
   Alert,
   AppState,
   Image,
-  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -44,6 +43,7 @@ import { applyLocalRelease, assertLocalVisitNotReserved, confirmCloudRelease, wi
 import { loadLocalRegister, RECOVERY_KEY, STORAGE_KEY, withLocalRegisterWrite } from './localRegister';
 import type { ReleaseDocument } from './loadingNote';
 import { COLORS } from './theme';
+import { KeyboardViewport } from './KeyboardViewport';
 import { CAMERA_DRAFT_KEY, discardTemporaryPhoto, preparePhoto, readPlateFromPhoto, recoverCameraDraft } from './registerCamera';
 
 type VehicleFilter = 'active' | 'history';
@@ -169,7 +169,7 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
-      <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardViewport style={styles.screen}>
         <ScrollView contentContainerStyle={styles.signIn} keyboardShouldPersistTaps="handled">
           <ParkBrand large />
           {session === undefined ? <ActivityIndicator color={COLORS.ink} /> : (
@@ -209,7 +209,7 @@ function CloudSignIn({ cloud }: { cloud: CloudRegister }) {
             </>
           )}
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardViewport>
     </SafeAreaView>
   );
 }
@@ -654,7 +654,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
-      <View style={styles.screen}>
+      <KeyboardViewport style={styles.screen}>
         <View style={styles.header}>
           <ParkBrand />
           {onSignOut ? (
@@ -849,7 +849,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
             </>
           )}
         </ScrollView>
-      </View>
+      </KeyboardViewport>
 
       {showStatement && (
         <StatementPanel
@@ -884,10 +884,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
         transparent
         visible={isAddingVehicle}
       >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
+        <KeyboardViewport modal style={styles.modalOverlay}>
           <Pressable onPress={requestCloseAddModal} style={styles.modalBackdrop} />
           <ScrollView
             style={styles.modalSheet}
@@ -1001,7 +998,7 @@ function ParkingScreen({ cloud, onSignOut }: { cloud?: CloudRegister; onSignOut?
               )}
             </Pressable>
           </ScrollView>
-        </KeyboardAvoidingView>
+        </KeyboardViewport>
       </Modal>
     </SafeAreaView>
   );

@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from 'react';
-import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { randomUUID } from 'expo-crypto';
 import type { Vehicle } from './cloudRegister';
 import {
@@ -8,11 +8,12 @@ import {
 } from './billing';
 import { exportStatement } from './billingDocument';
 import { COLORS } from './theme';
+import { KeyboardViewport } from './KeyboardViewport';
 
 export function Panel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   return (
     <Modal transparent visible animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardViewport modal style={styles.overlay}>
         <View style={styles.panel}>
           <View style={styles.header}>
             <Text style={styles.title}>{title}</Text>
@@ -22,7 +23,7 @@ export function Panel({ title, onClose, children }: { title: string; onClose: ()
           </View>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">{children}</ScrollView>
         </View>
-      </KeyboardAvoidingView>
+      </KeyboardViewport>
     </Modal>
   );
 }
